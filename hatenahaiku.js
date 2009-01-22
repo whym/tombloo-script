@@ -1,3 +1,199 @@
+Components.classes['@brasil.to/tombloo-service;1'].getService().wrappedJSObject['request'] = function (url, opts){
+	var d = new Deferred();
+	
+	opts = opts || {};
+	
+	var uri = createURI(url + queryString(opts.queryString, true));
+	var channel = broad(IOService.newChannelFromURI(uri));
+	
+	if(opts.referrer)
+		channel.referrer = createURI(opts.referrer);
+
+	if(opts.authorization)
+		channel.setRequestHeader('Authorization', opts.authorization, true);
+
+	setCookie(channel);
+	
+	if(opts.sendContent){
+		var contents = opts.sendContent;
+		
+		// マルチパートチェック/パラメーター準備
+		var multipart;
+		for(var name in contents){
+			// 値として直接ファイルが設定されているか?
+			var value = contents[name];
+			if(value instanceof IInputStream || value instanceof IFile)
+				value = contents[name] = {file : value};
+			
+			if(value && value.file)
+				multipart = true;
+		}
+		
+		if(!multipart){
+			contents = queryString(contents);
+			channel.setUploadStream(
+				new StringInputStream(contents), 
+				'application/x-www-form-urlencoded', -1);
+		} else {
+			var boundary = '---------------------------' + (new Date().getTime());
+			var streams = [];
+			
+			for(var name in contents){
+				var value = contents[name];
+				if(value==null)
+					continue;
+				
+				if(!value.file){
+					streams.push([
+						'--' + boundary,
+						'Content-Disposition: form-data; name="' + name + '"',
+						'',
+						(value.convertFromUnicode? value.convertFromUnicode() : value),
+					]);
+				} else {
+					if(value.file instanceof IFile){
+						value.fileName = value.file.leafName;
+						value.file = IOService.newChannelFromURI(createURI(value.file)).open();
+					}
+					
+					streams.push([
+						'--' + boundary,
+						'Content-Disposition: form-data; name="' + name + '"; filename="' + (value.fileName || '_') + '"',
+						'Content-Type: ' + (value.contentType || 'application/octet-stream'),
+						'',
+					])
+					streams.push(new BufferedInputStream(value.file));
+					streams.push('');
+				}
+			}
+			streams.push('--' + boundary + '--');
+			
+			var mimeStream = new MIMEInputStream(new MultiplexInputStream(streams));
+			mimeStream.addHeader('Content-Type', 'multipart/form-data; boundary=' + boundary);
+			channel.setUploadStream(mimeStream, null, -1);
+		}
+	}
+	
+	var redirectionCount = 0;
+	var listener = {
+		QueryInterface : createQueryInterface([
+			'nsIStreamListener', 
+			'nsIProgressEventSink', 
+			'nsIHttpEventSink', 
+			'nsIInterfaceRequestor', 
+			'nsIChannelEventSink']),
+		
+		isAppOfType : function(val){
+			// http://hg.mozilla.org/mozilla-central/file/FIREFOX_3_1b2_RELEASE/docshell/base/nsILoadContext.idl#l78
+			//
+			// 本リスナが特定のアプリケーション目的で使用され、その
+			// アプリケーション種別に対して動作可能かを返す。
+			// val にはアプリケーション種別を示す nsIDocShell の
+			// APP_TYPE_XXX が渡される。
+			//
+			//   APP_TYPE_UNKNOWN 0
+			//   APP_TYPE_MAIL    1
+			//   APP_TYPE_EDITOR  2
+			return (val == 0);
+		},
+		
+		// nsIProgressEventSink
+		onProgress : function(req, ctx, progress, progressMax){},
+		onStatus : function(req, ctx, status, statusArg){},
+		
+		// nsIInterfaceRequestor
+		getInterface : function(iid){
+			// Firefox 2でnsIPromptを要求されエラーになるため判定処理を外す
+			// インターフェースにないメソッドを呼ばれる可能性があるが確認範囲で発生しなかった
+			// http://developer.mozilla.org/ja/docs/Creating_Sandboxed_HTTP_Connections
+			return this;
+		},
+		
+		// nsIHttpEventSink
+		onRedirect : function(oldChannel, newChannel){},
+		
+		// nsIChannelEventSink
+		onChannelRedirect : function(oldChannel, newChannel, flags){
+			// channel.redirectionLimitを使うとリダイレクト後のアドレスが取得できない
+			redirectionCount++;
+			
+			if(opts.redirectionLimit!=null && redirectionCount>opts.redirectionLimit){
+				// NS_ERROR_REDIRECT_LOOP
+				newChannel.cancel(2152398879);
+				
+				var res = {
+					channel : newChannel,
+					responseText : '',
+					status : oldChannel.responseStatus,
+					statusText : oldChannel.responseStatusText,
+				};
+				d.callback(res);
+				
+				return;
+			}
+			
+			setCookie(newChannel);
+		},
+		
+		// nsIStreamListener
+		onStartRequest: function(req, ctx){
+			this.data = [];
+		},
+		onDataAvailable: function(req, ctx, stream, sourceOffset, length){
+			this.data.push(new InputStream(stream).read(length));
+		},
+		onStopRequest: function (req, ctx, status){
+			// Firefox 3ではcancelするとonStopRequestは呼ばれない
+			if(opts.redirectionLimit!=null && redirectionCount>opts.redirectionLimit)
+				return;
+			
+			broad(req);
+			
+			var text = this.data.join('');
+			var charset = opts.charset || req.contentCharset;
+			
+			try{
+				text = charset? text.convertToUnicode(charset) : text;
+			} catch(err){
+				// [FIXME] 調査中
+				error(err);
+				error(charset);
+				error(text);
+			}
+			var res = {
+				channel : req,
+				responseText : text,
+				status : req.responseStatus,
+				statusText : req.responseStatusText,
+			};
+			
+			if(Components.isSuccessCode(status) && res.status < 400){
+				d.callback(res);
+			}else{
+				res.message = getMessage('error.http.' + res.status);
+				d.errback(res);
+			}
+		},
+	};
+	
+	channel.requestMethod = 
+		(opts.method)? opts.method : 
+		(opts.sendContent)? 'POST' : 'GET';
+	channel.notificationCallbacks = listener;
+	channel.asyncOpen(listener, null);
+	
+	// 確実にガベージコレクトされるように解放する
+	listener = null;
+	channel = null;
+	
+	return d;
+};
+
+addBefore(Tombloo.Service, 'post', function(ps) {
+	if (ps.type == 'quote' && (!ps.favorite || ps.favorite.name != 'Tumblr'))
+		ps.body = '"' + ps.body + '"';
+});
+
 Tombloo.Service.extractors.register(
 	{
 		name: 'HatenaHaiku',
@@ -95,7 +291,7 @@ models.register({
 
 			// 先頭タグをはてなハイクキーワードに使う。タグがなければ個人用キーワード。
 			var haikukeyword = 'id:' + token.username;
-			if (ps.tags) {
+			if (ps.tags && ps.tags.length >= 1) {
 				haikukeyword = ps.tags.shift();
 				ps.tags = Hatena.reprTags(ps.tags);
 			} else {
