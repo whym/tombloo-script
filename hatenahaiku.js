@@ -111,9 +111,10 @@ models.register({
 				], "\n", true);
 			} else if(ps.type == 'quote' || ps.type == 'link' || ps.type == 'regular') {
 				body = joinText([
-					ps.itemUrl? ('[' + ps.itemUrl + ':title='+ ps.item + ']'): ps.item,
-					' ',
+					ps.item,
+					ps.itemUrl,
 					ps.body? ">>\n"+ps.body+"\n<<": '',
+					' ',
 					ps.tags,
 					ps.description
 				], "\n", true);
