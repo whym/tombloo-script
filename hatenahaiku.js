@@ -28,11 +28,9 @@ models.register({
 	post : function(ps){
 		return function(){
 			var ck = Hatena.getAuthCookie();
-			alert(ck);
 			if(!ck)
 			throw new Error(getMessage('error.notLoggedin'));
 			var token = md5_base64(ck.substr(3));
-			alert(token);
 
 			if (!ps.description)
 				ps.description = '';
@@ -47,7 +45,6 @@ models.register({
 			}
 
 			var body;
-			alert(!!ps.file);
 			if (ps.type == 'regular') {
 				body = joinText([
 					ps.item,
