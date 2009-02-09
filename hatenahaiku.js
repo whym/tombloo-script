@@ -250,6 +250,22 @@ models.register({
             }
         });
     },
+	getSuggestions : function(url){
+		return models.HatenaHaiku.getTokenUsername().addCallback(function(tk){
+			return request('http://h.hatena.ne.jp/' + tk.username + '/following');
+		}).addCallback(function(res){
+			var doc = convertToHTMLDocument(res.responseText);
+			return {
+				duplicated : false,
+				tags : $x('//ul[@class="list-keyword"]/li/a/text()', doc, true).map(function(tag){
+					return {
+						name      : tag,
+						frequency : -1,
+					};
+				}),
+			};
+		});
+	},
 	post : function(ps){
 		return Hatena.getToken().addCallback(function(token){
 			if (!ps.description)
