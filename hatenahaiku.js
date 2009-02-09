@@ -351,16 +351,21 @@ Tombloo.Service.extractors.register([
 		getEntry : function(ctx){
 			return $x('./ancestor::div[contains(@class,"entry")]', ctx.target);
 		},
-		getItem : function(ctx, ent){
-			var entry = ent || this.getEntry(ctx);
+		getItem : function(ctx, getOnly){
+			var entry = this.getEntry(ctx);
 			var author = $x('.//span[contains(@class,"username")]/a', entry);
 			var username = author.textContent.trim();
-			return {
-				itemUrl   : 'http://' + ctx.host + $x('.//span[contains(@class,"timestamp")]/a/@href', entry),
-				item      : $x('.//h2[contains(@class,"title")]/a/text()', entry) + ' - ' + username,
-				author    : username,
-				authorUrl : author.href
+			var res = {
+				item     : $x('.//h2[contains(@class,"title")]/a/text()', entry) + ' - ' + username,
+				itemUrl  : 'http://' + ctx.host + $x('.//span[contains(@class,"timestamp")]/a/@href', entry),
+				author   : username,
+				authorUrl: author.href,
 			};
+			if(!getOnly){
+				ctx.href  = res.itemUrl;
+				ctx.title = res.item;
+			}
+			return res;
 		}
 	},
 
@@ -372,7 +377,8 @@ Tombloo.Service.extractors.register([
 		},
 		extract : function(ctx){
 			return update({
-				type : 'link',
+				type    : 'photo',
+				itemUrl : ctx.target.src
 			}, Tombloo.Service.extractors.HatenaHaiku.getItem(ctx));
 		},
 	},
@@ -395,7 +401,7 @@ Tombloo.Service.extractors.register([
 				return update({
 					type    : 'quote',
 					body    : body.trim(),
-				}, Tombloo.Service.extractors.HatenaHaiku.getItem(ctx, entry));
+				}, Tombloo.Service.extractors.HatenaHaiku.getItem(ctx));
 			});
 		},
 	},
@@ -409,8 +415,6 @@ Tombloo.Service.extractors.register([
 		extract : function(ctx){
 			var ps = Tombloo.Service.extractors.HatenaHaiku.getItem(ctx);
 			ps.type = 'link';
-			ctx.title = ps.item;
-			ctx.href = ps.itemUrl;
 			return ps;
 		},
 	},
