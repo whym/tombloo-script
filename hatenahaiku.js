@@ -78,6 +78,34 @@ models.register(update({
 			return '[' + t + ']';
 		}), '', true) : '' ;
 	},
+
+  loginParams : {
+    username: 'text',
+    password: 'pass'
+  },
+
+  // Change Accountもあるので同調
+  loginRequest : function(params){
+		return (models.Hatena.getAuthCookie()? models.Hatena.logout() : succeed()).addCallback(function(){
+			return request('https://www.hatena.ne.jp/login', {
+				sendContent : {
+					name : params.username,
+					password : params.password,
+					persistent : 1,
+					location : 'http://www.hatena.ne.jp/',
+				},
+			});
+		}).addCallback(function(res){
+      var doc = convertToHTMLDocument(res.responseText);
+      var form = $x('id("body")/form', doc);
+      var result = !(form);
+      if(result){
+        models.Hatena.updateSession();
+        models.Hatena.user = user;
+      }
+      return result;
+		});
+	},
 }, AbstractSessionService));
 
 models.register({
@@ -251,6 +279,132 @@ models.register({
         });
     },
 	getSuggestions : function(url){
+		var tags = {};
+		var tk;
+		return models.HatenaHaiku.getTokenUsername().addCallback(function(tk_){
+			tk = tk_;
+			return request('http://h.hatena.ne.jp/api/statuses/keywords/' + tk.username + '.json');
+																 }).addCallback(function(res){
+			var json = evalInSandbox(res.responseText, 'http://h.hatena.ne.jp');
+			json.forEach(function(k){
+				tags[k.title] = {name: k.title, frequency: k.entry_count};
+			});
+			return request('http://h.hatena.ne.jp/api/statuses/user_timeline/' + tk.username + '.json');
+		}).addCallback(function(res){
+			var json = evalInSandbox(res.responseText, 'http://h.hatena.ne.jp');
+			json.forEach(function(s){
+				tags[s.keyword] = tags[s.keyword]? tags[s.keyword]: {name:s.keyword, frequency: -1};
+			});
+			var list = [];
+			for (var x in tags) {
+				list.push(tags[x]);
+			}
+			return {
+				duplicated : false,
+				tags : list
+			};
+		});
+	},
+	post : function(ps){
+		return Hatena.getToken().addCallback(function(token){
+			if (!ps.description)
+				ps.description = '';
+			// 先頭タグをはてなハイクキーワードに使う。タグがなければ空文字列（= private キーワード）
+			var haikukeyword = '';
+			if (ps.tags && ps.tags.length >= 1) {
+				haikukeyword = ps.tags.shift();
+				ps.tags = Hatena.reprTags(ps.tags);
+			} else {
+				ps.tags = '';
+			}
+
+			var body;
+			if (ps.type == 'regular') {
+				body = joinText([
+					ps.item,
+					ps.tags,
+					ps.description
+				], "\n", true);
+			} else if(ps.type == 'quote' || ps.type == 'link' || ps.type == 'regular') {
+				body = joinText([
+					ps.itemUrl? '['+ps.itemUrl+':title='+ps.item+']': ps.item,
+					ps.body? ">>\n"+ps.body+"\n<<": '',
+					' ',
+					ps.tags,
+					ps.description
+				], "\n", true);
+			} else if (ps.type == 'photo') {
+				if (!ps.file) {
+					body = joinText([
+						ps.itemUrl,
+						ps.pageUrl? '['+ps.pageUrl+':title='+ps.page+']': ps.item,
+						' ',
+						ps.tags,
+						ps.description
+					], "\n", true);
+				} else {
+					body = joinText([
+						ps.tags,
+						ps.description,
+						' ',
+						ps.pageUrl? '['+ps.pageUrl+':title='+ps.page+']': ps.item
+					], "\n", true);
+
+				}
+			} else {
+				body = joinText([ps.itemUrl, ps.item, ' ', ps.body, ps.description], "\n", true);
+			}
+			if(ps.type == 'photo' && ps.file) { // ファイルは /entry では送れないので、/api を使う
+				models.HatenaHaiku.getTokenUsername().addCallback(function(tk){
+					return request('http://h.hatena.ne.jp/api/statuses/update.json', {
+	                    redirectionLimit : 0,
+	                    authorization: 'Basic '+window.btoa(tk.username+':'+tk.token),
+	                    sendContent : {
+	                        status  : body,
+							keyword : haikukeyword==''? 'id:'+tk.username: haikukeyword,
+	                        file    : ps.file,
+	                        source  : 'tombloo',
+							token   : tk.token,
+							username : tk.username
+						}
+					});
+				});
+			} else {
+				return request('http://h.hatena.ne.jp/entry', {
+					redirectionLimit : 0,
+					sendContent : {
+						body   : body,
+						word   : haikukeyword,
+						source : 'tombloo',
+						rkm    : token
+					}
+				});
+			}
+		});
+	},
+});
+
+models.register({
+	name : 'HatenaHaiku',
+	ICON : 'http://h.hatena.ne.jp/favicon.ico',
+	
+	check : function(ps){
+		return ps.type.match(/(regular|photo|quote|link|conversation|video)/);
+	},
+	getTokenUsername : function(){
+        return request('http://h.hatena.ne.jp/api').addCallback(function(res){
+			var doc = convertToHTMLDocument(res.responseText);
+			var token = $x('//input[@class="forcopy"]', doc);
+			var username = $x('//p[@class="username"]/a', doc);
+			if(!token || !username)
+                throw new Error(getMessage('error.notLoggedin'));
+			return {
+                token: token.value,
+                username: username.textContent
+            }
+        });
+    },
+	getSuggestions : function(url){
 		return models.HatenaHaiku.getTokenUsername().addCallback(function(tk){
 			return request('http://h.hatena.ne.jp/' + tk.username + '/following');
 		}).addCallback(function(res){
@@ -376,10 +530,10 @@ Tombloo.Service.extractors.register([
 			return ctx.onImage && ctx.href.match(/\/\/h\.hatena\.(ne\.jp|com)/) && Tombloo.Service.extractors.HatenaHaiku.getEntry(ctx);
 		},
 		extract : function(ctx){
-			return update({
+			return update(Tombloo.Service.extractors.HatenaHaiku.getItem(ctx), {
 				type    : 'photo',
 				itemUrl : ctx.target.src
-			}, Tombloo.Service.extractors.HatenaHaiku.getItem(ctx));
+			});
 		},
 	},
 
